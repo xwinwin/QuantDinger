@@ -16,7 +16,7 @@ export default {
   name: 'IndicatorCommunity',
   data () {
     return {
-      url: 'https://www.quantdinger.com'
+      url: 'https://www.quantdinger.com/'
     }
   }
 }
