@@ -1076,14 +1076,14 @@ export default {
     filterByGroup () {
       // Filter is handled by computed property
     },
-    // 刷新价格
+    // 刷新价格（强制刷新，跳过缓存）
     async refreshPrices () {
       if (this.isSyncing) return
       this.isSyncing = true
       try {
         await Promise.all([
-          this.loadPositions(),
-          this.loadSummary()
+          this.loadPositions(true), // 强制刷新
+          this.loadSummary(true) // 强制刷新
         ])
         this.lastSyncTime = new Date()
       } finally {
@@ -1146,10 +1146,11 @@ export default {
         ]
       }
     },
-    async loadPositions () {
+    async loadPositions (forceRefresh = false) {
       this.loadingPositions = true
       try {
-        const res = await getPositions()
+        const params = forceRefresh ? { refresh: '1' } : {}
+        const res = await getPositions(params)
         if (res && res.code === 1) {
           this.positions = res.data || []
         }
@@ -1159,9 +1160,9 @@ export default {
         this.loadingPositions = false
       }
     },
-    async loadSummary () {
+    async loadSummary (forceRefresh = false) {
       try {
-        const res = await getPortfolioSummary()
+        const res = await getPortfolioSummary(forceRefresh ? { refresh: '1' } : {})
         if (res && res.code === 1) {
           this.summary = res.data || this.summary
         }

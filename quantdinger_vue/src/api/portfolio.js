@@ -5,10 +5,11 @@ import request from '@/utils/request'
 
 // ==================== Positions ====================
 
-export function getPositions () {
+export function getPositions (params = {}) {
   return request({
     url: '/api/portfolio/positions',
-    method: 'get'
+    method: 'get',
+    params
   })
 }
 
@@ -35,10 +36,11 @@ export function deletePosition (id) {
   })
 }
 
-export function getPortfolioSummary () {
+export function getPortfolioSummary (params = {}) {
   return request({
     url: '/api/portfolio/summary',
-    method: 'get'
+    method: 'get',
+    params
   })
 }
 

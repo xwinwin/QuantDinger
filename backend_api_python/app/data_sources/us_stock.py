@@ -54,6 +54,114 @@ class USStockDataSource(BaseDataSource):
         except Exception as e:
             logger.warning(f"Finnhub init failed: {e}")
     
+    def get_ticker(self, symbol: str) -> Dict[str, Any]:
+        """
+        获取美股实时报价
+        
+        优先使用 Finnhub（更实时），降级使用 yfinance fast_info
+        
+        Returns:
+            dict: {
+                'last': 当前价格,
+                'change': 涨跌额,
+                'changePercent': 涨跌幅,
+                'high': 最高价,
+                'low': 最低价,
+                'open': 开盘价,
+                'previousClose': 昨收价
+            }
+        """
+        symbol = (symbol or '').strip().upper()
+        
+        # 优先使用 Finnhub（实时数据）
+        if self.finnhub_client:
+            try:
+                quote = self.finnhub_client.quote(symbol)
+                if quote and quote.get('c'):
+                    return {
+                        'last': quote.get('c', 0),           # 当前价格
+                        'change': quote.get('d', 0),         # 涨跌额
+                        'changePercent': quote.get('dp', 0), # 涨跌幅
+                        'high': quote.get('h', 0),           # 日内最高
+                        'low': quote.get('l', 0),            # 日内最低
+                        'open': quote.get('o', 0),           # 开盘价
+                        'previousClose': quote.get('pc', 0)  # 昨收价
+                    }
+            except Exception as e:
+                logger.warning(f"Finnhub quote failed for {symbol}: {e}")
+        
+        # 降级使用 yfinance
+        try:
+            ticker = yf.Ticker(symbol)
+            
+            # 尝试 fast_info（更快）
+            try:
+                fast_info = ticker.fast_info
+                last_price = fast_info.get('lastPrice') or fast_info.get('last_price')
+                prev_close = fast_info.get('previousClose') or fast_info.get('previous_close') or fast_info.get('regularMarketPreviousClose')
+                
+                if last_price:
+                    change = (last_price - prev_close) if prev_close else 0
+                    change_pct = (change / prev_close * 100) if prev_close else 0
+                    return {
+                        'last': float(last_price),
+                        'change': round(change, 4),
+                        'changePercent': round(change_pct, 2),
+                        'high': float(fast_info.get('dayHigh') or fast_info.get('day_high') or last_price),
+                        'low': float(fast_info.get('dayLow') or fast_info.get('day_low') or last_price),
+                        'open': float(fast_info.get('open') or fast_info.get('regularMarketOpen') or last_price),
+                        'previousClose': float(prev_close) if prev_close else 0
+                    }
+            except Exception as e:
+                logger.debug(f"yfinance fast_info failed for {symbol}: {e}")
+            
+            # 降级使用 info（较慢但数据更全）
+            try:
+                info = ticker.info
+                last_price = info.get('regularMarketPrice') or info.get('currentPrice')
+                prev_close = info.get('regularMarketPreviousClose') or info.get('previousClose')
+                
+                if last_price:
+                    change = (last_price - prev_close) if prev_close else 0
+                    change_pct = (change / prev_close * 100) if prev_close else 0
+                    return {
+                        'last': float(last_price),
+                        'change': round(change, 4),
+                        'changePercent': round(change_pct, 2),
+                        'high': float(info.get('regularMarketDayHigh') or info.get('dayHigh') or last_price),
+                        'low': float(info.get('regularMarketDayLow') or info.get('dayLow') or last_price),
+                        'open': float(info.get('regularMarketOpen') or info.get('open') or last_price),
+                        'previousClose': float(prev_close) if prev_close else 0
+                    }
+            except Exception as e:
+                logger.debug(f"yfinance info failed for {symbol}: {e}")
+            
+            # 最后降级：使用最近的 1 分钟 K 线
+            try:
+                hist = ticker.history(period='1d', interval='1m')
+                if hist is not None and not hist.empty:
+                    last_row = hist.iloc[-1]
+                    first_row = hist.iloc[0]
+                    last_price = float(last_row['Close'])
+                    open_price = float(first_row['Open'])
+                    
+                    return {
+                        'last': last_price,
+                        'change': round(last_price - open_price, 4),
+                        'changePercent': round((last_price - open_price) / open_price * 100, 2) if open_price else 0,
+                        'high': float(hist['High'].max()),
+                        'low': float(hist['Low'].min()),
+                        'open': open_price,
+                        'previousClose': open_price  # 近似
+                    }
+            except Exception as e:
+                logger.debug(f"yfinance history fallback failed for {symbol}: {e}")
+                
+        except Exception as e:
+            logger.error(f"Failed to get ticker for {symbol}: {e}")
+        
+        return {'last': 0, 'symbol': symbol}
+    
     def get_kline(
         self,
         symbol: str,
@@ -108,9 +216,14 @@ class USStockDataSource(BaseDataSource):
         """使用 yfinance 获取数据"""
         try:
             ticker = yf.Ticker(symbol)
+            
+            # yfinance 的 end 参数是不包含的（exclusive），所以需要加一天才能包含 end_date 当天的数据
+            # 例如：end="2026-01-12" 实际只返回到 2026-01-11 的数据
+            end_date_inclusive = end_date + timedelta(days=1)
+            
             df = ticker.history(
                 start=start_date.strftime('%Y-%m-%d'),
-                end=end_date.strftime('%Y-%m-%d'),
+                end=end_date_inclusive.strftime('%Y-%m-%d'),
                 interval=interval
             )
             # logger.info(f"yfinance 返回 {len(df) if df is not None and not df.empty else 0} 条数据")

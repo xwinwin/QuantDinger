@@ -386,6 +386,94 @@ class AShareDataSource(BaseDataSource, TencentDataMixin):
             logger.error(traceback.format_exc())
         
         return klines
+    
+    def get_ticker(self, symbol: str) -> Dict[str, Any]:
+        """
+        获取A股实时报价
+        
+        使用东方财富实时行情API获取实时报价
+        
+        Returns:
+            dict: {
+                'last': 当前价格,
+                'change': 涨跌额,
+                'changePercent': 涨跌幅,
+                'high': 最高价,
+                'low': 最低价,
+                'open': 开盘价,
+                'previousClose': 昨收价
+            }
+        """
+        symbol = (symbol or '').strip()
+        
+        # 优先使用东方财富实时行情 API
+        try:
+            # 判断市场
+            if symbol.startswith('6'):
+                secid = f"1.{symbol}"  # 上海
+            elif symbol.startswith('0') or symbol.startswith('3'):
+                secid = f"0.{symbol}"  # 深圳
+            elif symbol.startswith('4') or symbol.startswith('8'):
+                secid = f"0.{symbol}"  # 北交所
+            else:
+                secid = f"1.{symbol}"
+            
+            # 东方财富实时行情接口
+            url = "https://push2.eastmoney.com/api/qt/stock/get"
+            params = {
+                'secid': secid,
+                'fields': 'f43,f44,f45,f46,f47,f48,f57,f58,f60,f169,f170',
+                # f43=最新价, f44=最高价, f45=最低价, f46=开盘价
+                # f60=昨收价, f169=涨跌额, f170=涨跌幅
+            }
+            
+            session = get_retry_session()
+            response = session.get(url, params=params, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                if data and data.get('data'):
+                    d = data['data']
+                    last_price = d.get('f43', 0)
+                    # 东方财富返回的价格是整数（分），需要除以100
+                    if last_price and last_price > 0:
+                        divisor = 100 if last_price > 1000 else 1  # 价格超过10元时用分表示
+                        return {
+                            'last': last_price / divisor,
+                            'high': d.get('f44', 0) / divisor,
+                            'low': d.get('f45', 0) / divisor,
+                            'open': d.get('f46', 0) / divisor,
+                            'previousClose': d.get('f60', 0) / divisor,
+                            'change': d.get('f169', 0) / divisor,
+                            'changePercent': d.get('f170', 0) / 100  # 涨跌幅是整数（%*100）
+                        }
+        except Exception as e:
+            logger.debug(f"Eastmoney ticker failed for {symbol}: {e}")
+        
+        # 降级使用腾讯实时报价
+        try:
+            tencent_symbol = self._to_tencent_symbol(symbol)
+            if tencent_symbol:
+                url = f"http://qt.gtimg.cn/q={tencent_symbol}"
+                response = requests.get(url, timeout=10)
+                content = response.content.decode('gbk', errors='ignore')
+                if '="' in content:
+                    data_str = content.split('="')[1].strip('";\n')
+                    if data_str:
+                        parts = data_str.split('~')
+                        if len(parts) > 32:
+                            return {
+                                'last': float(parts[3]) if parts[3] else 0,
+                                'change': float(parts[31]) if parts[31] else 0,
+                                'changePercent': float(parts[32]) if parts[32] else 0,
+                                'high': float(parts[33]) if len(parts) > 33 and parts[33] else 0,
+                                'low': float(parts[34]) if len(parts) > 34 and parts[34] else 0,
+                                'open': float(parts[5]) if len(parts) > 5 and parts[5] else 0,
+                                'previousClose': float(parts[4]) if parts[4] else 0
+                            }
+        except Exception as e:
+            logger.debug(f"Tencent ticker failed for {symbol}: {e}")
+        
+        return {'last': 0, 'symbol': symbol}
 
 
 class HShareDataSource(BaseDataSource, TencentDataMixin):
@@ -613,3 +701,79 @@ class HShareDataSource(BaseDataSource, TencentDataMixin):
             logger.error(traceback.format_exc())
         
         return klines
+    
+    def get_ticker(self, symbol: str) -> Dict[str, Any]:
+        """
+        获取港股实时报价
+        
+        使用腾讯财经实时行情API获取实时报价
+        
+        Returns:
+            dict: {
+                'last': 当前价格,
+                'change': 涨跌额,
+                'changePercent': 涨跌幅,
+                'high': 最高价,
+                'low': 最低价,
+                'open': 开盘价,
+                'previousClose': 昨收价
+            }
+        """
+        symbol = (symbol or '').strip()
+        
+        # 使用腾讯财经实时报价
+        try:
+            tencent_symbol = self._to_tencent_symbol(symbol)
+            url = f"http://qt.gtimg.cn/q={tencent_symbol}"
+            response = requests.get(url, timeout=10)
+            content = response.content.decode('gbk', errors='ignore')
+            if '="' in content:
+                data_str = content.split('="')[1].strip('";\n')
+                if data_str:
+                    parts = data_str.split('~')
+                    if len(parts) > 32:
+                        return {
+                            'last': float(parts[3]) if parts[3] else 0,
+                            'change': float(parts[31]) if parts[31] else 0,
+                            'changePercent': float(parts[32]) if parts[32] else 0,
+                            'high': float(parts[33]) if len(parts) > 33 and parts[33] else 0,
+                            'low': float(parts[34]) if len(parts) > 34 and parts[34] else 0,
+                            'open': float(parts[5]) if len(parts) > 5 and parts[5] else 0,
+                            'previousClose': float(parts[4]) if parts[4] else 0
+                        }
+        except Exception as e:
+            logger.debug(f"Tencent ticker failed for {symbol}: {e}")
+        
+        # 降级使用东方财富
+        try:
+            hk_symbol = symbol.zfill(5)
+            secid = f"116.{hk_symbol}"
+            
+            url = "https://push2.eastmoney.com/api/qt/stock/get"
+            params = {
+                'secid': secid,
+                'fields': 'f43,f44,f45,f46,f47,f48,f57,f58,f60,f169,f170',
+            }
+            
+            session = get_retry_session()
+            response = session.get(url, params=params, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                if data and data.get('data'):
+                    d = data['data']
+                    last_price = d.get('f43', 0)
+                    if last_price and last_price > 0:
+                        divisor = 1000 if last_price > 10000 else 100 if last_price > 1000 else 1
+                        return {
+                            'last': last_price / divisor,
+                            'high': d.get('f44', 0) / divisor,
+                            'low': d.get('f45', 0) / divisor,
+                            'open': d.get('f46', 0) / divisor,
+                            'previousClose': d.get('f60', 0) / divisor,
+                            'change': d.get('f169', 0) / divisor,
+                            'changePercent': d.get('f170', 0) / 100
+                        }
+        except Exception as e:
+            logger.debug(f"Eastmoney ticker failed for {symbol}: {e}")
+        
+        return {'last': 0, 'symbol': symbol}

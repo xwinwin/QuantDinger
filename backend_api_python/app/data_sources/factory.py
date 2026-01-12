@@ -103,4 +103,31 @@ class DataSourceFactory:
         except Exception as e:
             logger.error(f"Failed to fetch K-lines {market}:{symbol} - {str(e)}")
             return []
+    
+    @classmethod
+    def get_ticker(cls, market: str, symbol: str) -> Dict[str, Any]:
+        """
+        获取实时报价的便捷方法
+        
+        Args:
+            market: 市场类型
+            symbol: 交易对/股票代码
+            
+        Returns:
+            实时报价数据: {
+                'last': 最新价,
+                'change': 涨跌额,
+                'changePercent': 涨跌幅,
+                ...
+            }
+        """
+        try:
+            source = cls.get_source(market)
+            return source.get_ticker(symbol)
+        except NotImplementedError:
+            logger.warning(f"get_ticker not implemented for market: {market}")
+            return {'last': 0, 'symbol': symbol}
+        except Exception as e:
+            logger.error(f"Failed to fetch ticker {market}:{symbol} - {str(e)}")
+            return {'last': 0, 'symbol': symbol}
 

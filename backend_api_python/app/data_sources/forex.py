@@ -55,6 +55,109 @@ class ForexDataSource(BaseDataSource):
         if not APIKeys.TIINGO_API_KEY:
              logger.warning("Tiingo API key is not configured; FX data will be unavailable")
     
+    def get_ticker(self, symbol: str) -> Dict[str, Any]:
+        """
+        获取外汇实时报价
+        
+        使用 Tiingo FX Top-of-Book API 获取实时报价
+        
+        Returns:
+            dict: {
+                'last': 当前价格 (mid price),
+                'bid': 买价,
+                'ask': 卖价,
+                'change': 涨跌额,
+                'changePercent': 涨跌幅
+            }
+        """
+        api_key = APIKeys.TIINGO_API_KEY
+        if not api_key:
+            logger.warning("Tiingo API key not configured")
+            return {'last': 0, 'symbol': symbol}
+        
+        try:
+            # 解析 symbol
+            tiingo_symbol = self.SYMBOL_MAP.get(symbol)
+            if not tiingo_symbol:
+                tiingo_symbol = symbol.lower()
+            
+            # Tiingo FX Top-of-Book API
+            # https://api.tiingo.com/tiingo/fx/top?tickers=eurusd&token=...
+            url = f"{self.base_url}/fx/top"
+            params = {
+                'tickers': tiingo_symbol,
+                'token': api_key
+            }
+            
+            # 重试逻辑：处理 429 速率限制
+            for attempt in range(3):
+                response = requests.get(url, params=params, timeout=TiingoConfig.TIMEOUT)
+                if response.status_code == 429:
+                    time.sleep(2 * (attempt + 1))
+                    continue
+                break
+            
+            if response.status_code == 429:
+                logger.warning("Tiingo rate limit exceeded for ticker request")
+                return {'last': 0, 'symbol': symbol}
+            
+            response.raise_for_status()
+            data = response.json()
+            
+            if data and isinstance(data, list) and len(data) > 0:
+                item = data[0]
+                # Tiingo FX top returns: ticker, quoteTimestamp, bidPrice, bidSize, askPrice, askSize, midPrice
+                bid = float(item.get('bidPrice', 0) or 0)
+                ask = float(item.get('askPrice', 0) or 0)
+                mid = float(item.get('midPrice', 0) or 0)
+                
+                # 如果没有 midPrice，计算中间价
+                if not mid and bid and ask:
+                    mid = (bid + ask) / 2
+                
+                last_price = mid or bid or ask
+                
+                # 获取前一天收盘价来计算涨跌（需要额外请求日线数据）
+                prev_close = 0
+                change = 0
+                change_pct = 0
+                
+                try:
+                    # 获取昨日收盘价
+                    yesterday = (datetime.now() - timedelta(days=2)).strftime('%Y-%m-%d')
+                    today = datetime.now().strftime('%Y-%m-%d')
+                    price_url = f"{self.base_url}/fx/{tiingo_symbol}/prices"
+                    price_params = {
+                        'startDate': yesterday,
+                        'endDate': today,
+                        'resampleFreq': '1day',
+                        'token': api_key
+                    }
+                    price_resp = requests.get(price_url, params=price_params, timeout=TiingoConfig.TIMEOUT)
+                    if price_resp.status_code == 200:
+                        price_data = price_resp.json()
+                        if price_data and len(price_data) > 0:
+                            prev_close = float(price_data[-1].get('close', 0) or 0)
+                            if prev_close and last_price:
+                                change = last_price - prev_close
+                                change_pct = (change / prev_close) * 100
+                except Exception:
+                    pass  # 涨跌计算失败不影响主要功能
+                
+                return {
+                    'last': round(last_price, 5),
+                    'bid': round(bid, 5),
+                    'ask': round(ask, 5),
+                    'change': round(change, 5),
+                    'changePercent': round(change_pct, 2),
+                    'previousClose': round(prev_close, 5) if prev_close else 0
+                }
+                
+        except Exception as e:
+            logger.error(f"Failed to get forex ticker for {symbol}: {e}")
+        
+        return {'last': 0, 'symbol': symbol}
+    
     def _get_timeframe_seconds(self, timeframe: str) -> int:
         """获取时间周期对应的秒数"""
         return TIMEFRAME_SECONDS.get(timeframe, 86400)
@@ -140,7 +243,7 @@ class ForexDataSource(BaseDataSource):
             start_date_str = start_dt.strftime('%Y-%m-%d')
             end_date_str = end_dt.strftime('%Y-%m-%d')
             
-            # 4. API 请求
+            # 4. API 请求（带重试逻辑）
             # URL: https://api.tiingo.com/tiingo/fx/{ticker}/prices
             url = f"{self.base_url}/fx/{tiingo_symbol}/prices"
             
@@ -154,11 +257,42 @@ class ForexDataSource(BaseDataSource):
             
             # logger.info(f"Tiingo Request: {url} params={params}")
             
-            response = requests.get(url, params=params, timeout=TiingoConfig.TIMEOUT)
+            # 重试逻辑：处理 429 速率限制
+            max_retries = 3
+            retry_delay = 2  # 秒
+            response = None
             
-            if response.status_code == 403: # 具体的权限错误
-                 logger.error("Tiingo API permission error (403): check whether your API key is valid and has access to this dataset.")
-                 return []
+            for attempt in range(max_retries):
+                try:
+                    response = requests.get(url, params=params, timeout=TiingoConfig.TIMEOUT)
+                    
+                    if response.status_code == 429:
+                        # 速率限制，等待后重试
+                        wait_time = retry_delay * (attempt + 1)
+                        logger.warning(f"Tiingo rate limit (429), waiting {wait_time}s before retry ({attempt + 1}/{max_retries})")
+                        time.sleep(wait_time)
+                        continue
+                    
+                    break  # 成功或其他错误，退出重试循环
+                    
+                except requests.exceptions.Timeout:
+                    if attempt < max_retries - 1:
+                        logger.warning(f"Tiingo request timeout, retrying ({attempt + 1}/{max_retries})")
+                        time.sleep(retry_delay)
+                        continue
+                    raise
+            
+            if response is None:
+                logger.error("Tiingo API request failed after all retries")
+                return []
+            
+            if response.status_code == 429:
+                logger.error("Tiingo API rate limit exceeded. Please wait a moment before retrying.")
+                return []
+            
+            if response.status_code == 403:
+                logger.error("Tiingo API permission error (403): check whether your API key is valid and has access to this dataset.")
+                return []
                  
             response.raise_for_status()
             data = response.json()
@@ -186,14 +320,13 @@ class ForexDataSource(BaseDataSource):
             for item in data:
                 # 解析时间: "2023-01-01T00:00:00.000Z"
                 dt_str = item.get('date')
-                # 简化处理，Tiingo 返回的是 UTC 时间 ISO 格式
-                # datetime.fromisoformat 在 Py3.7+ 支持，但要注意 Z 的处理
-                # 这里简单处理一下 Z
+                # Tiingo 返回的是 UTC 时间 ISO 格式，需要正确处理时区
+                # 将 UTC 时间转换为本地时间戳
                 if dt_str.endswith('Z'):
-                    dt_str = dt_str[:-1]
+                    dt_str = dt_str[:-1] + '+00:00'  # 替换 Z 为 +00:00 表示 UTC
                 
                 dt = datetime.fromisoformat(dt_str)
-                ts = int(dt.timestamp())
+                ts = int(dt.timestamp())  # 现在会正确处理 UTC 时区
                 
                 klines.append({
                     'time': ts,

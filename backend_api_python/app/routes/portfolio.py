@@ -6,6 +6,7 @@ from flask import Blueprint, request, jsonify
 import json
 import traceback
 import time
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from app.services.kline import KlineService
@@ -22,7 +23,15 @@ kline_service = KlineService()
 cache = CacheManager()
 
 # Thread pool for parallel price fetching
-executor = ThreadPoolExecutor(max_workers=10)
+# 降低并发数避免触发API限制（尤其是外汇/美股等有速率限制的API）
+executor = ThreadPoolExecutor(max_workers=3)
+
+# 请求间隔（秒），避免请求过快
+REQUEST_INTERVAL = 0.3
+
+# 速率限制相关
+_request_lock = threading.Lock()
+_last_request_time = {}  # {market: timestamp}
 
 DEFAULT_USER_ID = 1
 
@@ -51,49 +60,40 @@ def _safe_json_loads(value, default=None):
     return default
 
 
-def _get_single_price(market: str, symbol: str) -> dict:
-    """Get price data for a single symbol."""
+def _get_single_price(market: str, symbol: str, force_refresh: bool = False) -> dict:
+    """
+    Get price data for a single symbol.
+    
+    优先使用实时报价 API（ticker），降级使用分钟/日线 K 线数据。
+    这样可以在交易时段获取更实时的价格，而不是只显示日线收盘价。
+    
+    内置速率限制：同一市场的请求间隔至少 REQUEST_INTERVAL 秒，
+    避免触发 API 限制（如 yfinance、Tiingo、Finnhub 等）。
+    
+    Args:
+        force_refresh: 是否强制刷新（跳过缓存）
+    """
     try:
-        cache_key = f"portfolio_price:{market}:{symbol}"
-        cached_data = cache.get(cache_key)
+        # 速率限制：同一市场的请求间隔
+        with _request_lock:
+            now = time.time()
+            last_time = _last_request_time.get(market, 0)
+            wait_time = REQUEST_INTERVAL - (now - last_time)
+            if wait_time > 0:
+                time.sleep(wait_time)
+            _last_request_time[market] = time.time()
         
-        if cached_data:
-            return {
-                'market': market,
-                'symbol': symbol,
-                'price': cached_data.get('price', 0),
-                'change': cached_data.get('change', 0),
-                'changePercent': cached_data.get('changePercent', 0)
-            }
+        # 使用新的 get_realtime_price 方法获取实时价格
+        price_data = kline_service.get_realtime_price(market, symbol, force_refresh=force_refresh)
         
-        klines = kline_service.get_kline(market, symbol, '1D', 2)
-        
-        if klines and len(klines) > 0:
-            latest = klines[-1]
-            prev_close = klines[-2]['close'] if len(klines) > 1 else latest.get('open', 0)
-            current_price = latest.get('close', 0)
-            
-            change = round(current_price - prev_close, 4) if prev_close else 0
-            change_percent = round(change / prev_close * 100, 2) if prev_close and prev_close > 0 else 0
-            
-            result = {
-                'market': market,
-                'symbol': symbol,
-                'price': current_price,
-                'change': change,
-                'changePercent': change_percent
-            }
-            
-            cache.set(cache_key, result, 60)
-            return result
-        else:
-            return {
-                'market': market,
-                'symbol': symbol,
-                'price': 0,
-                'change': 0,
-                'changePercent': 0
-            }
+        return {
+            'market': market,
+            'symbol': symbol,
+            'price': price_data.get('price', 0),
+            'change': price_data.get('change', 0),
+            'changePercent': price_data.get('changePercent', 0),
+            'source': price_data.get('source', 'unknown')  # 记录数据来源，便于调试
+        }
     except Exception as e:
         logger.error(f"Failed to fetch price {market}:{symbol} - {str(e)}")
         return {
@@ -101,7 +101,8 @@ def _get_single_price(market: str, symbol: str) -> dict:
             'symbol': symbol,
             'price': 0,
             'change': 0,
-            'changePercent': 0
+            'changePercent': 0,
+            'source': 'error'
         }
 
 
@@ -111,6 +112,9 @@ def _get_single_price(market: str, symbol: str) -> dict:
 def get_positions():
     """Get all manual positions with current prices."""
     try:
+        # 检查是否强制刷新（跳过缓存）
+        force_refresh = request.args.get('refresh', '').lower() in ('1', 'true', 'yes')
+        
         with get_db_connection() as db:
             cur = db.cursor()
             cur.execute(
@@ -155,13 +159,13 @@ def get_positions():
             }
             positions.append(pos)
             
-            # Submit price fetch task
+            # Submit price fetch task (with force_refresh support)
             market = row.get('market')
             symbol = row.get('symbol')
             if market and symbol:
                 key = f"{market}:{symbol}"
                 if key not in price_futures:
-                    future = executor.submit(_get_single_price, market, symbol)
+                    future = executor.submit(_get_single_price, market, symbol, force_refresh)
                     price_futures[key] = future
 
         # Collect price results
@@ -364,6 +368,9 @@ def delete_position(position_id):
 def get_portfolio_summary():
     """Get portfolio summary with total value, PnL, and market distribution."""
     try:
+        # 检查是否强制刷新
+        force_refresh = request.args.get('refresh', '').lower() in ('1', 'true', 'yes')
+        
         with get_db_connection() as db:
             cur = db.cursor()
             cur.execute(
@@ -391,14 +398,14 @@ def get_portfolio_summary():
                 }
             })
 
-        # Fetch prices in parallel
+        # Fetch prices in parallel (with force_refresh support)
         price_futures = {}
         for row in rows:
             market = row.get('market')
             symbol = row.get('symbol')
             key = f"{market}:{symbol}"
             if key not in price_futures:
-                future = executor.submit(_get_single_price, market, symbol)
+                future = executor.submit(_get_single_price, market, symbol, force_refresh)
                 price_futures[key] = future
 
         price_map = {}

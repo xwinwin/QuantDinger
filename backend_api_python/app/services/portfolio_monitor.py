@@ -116,12 +116,11 @@ def _get_positions_for_monitor(position_ids: List[int] = None) -> List[Dict[str,
             quantity = float(row.get('quantity') or 0)
             side = row.get('side') or 'long'
             
-            # Get current price
+            # Get current price (use realtime price API)
             current_price = 0
             try:
-                klines = kline_service.get_kline(market, symbol, '1D', 1)
-                if klines:
-                    current_price = float(klines[-1].get('close') or 0)
+                price_data = kline_service.get_realtime_price(market, symbol)
+                current_price = float(price_data.get('price') or 0)
             except Exception:
                 pass
             
@@ -982,12 +981,11 @@ def _check_position_alerts():
                 if not can_trigger:
                     continue
                 
-                # Get current price
+                # Get current price (use realtime price API)
                 current_price = 0
                 try:
-                    klines = kline_service.get_kline(market, symbol, '1D', 1)
-                    if klines:
-                        current_price = float(klines[-1].get('close') or 0)
+                    price_data = kline_service.get_realtime_price(market, symbol)
+                    current_price = float(price_data.get('price') or 0)
                 except Exception:
                     continue
                 

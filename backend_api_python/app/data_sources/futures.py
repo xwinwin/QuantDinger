@@ -156,11 +156,14 @@ class FuturesDataSource(BaseDataSource):
             tf_seconds = self._get_timeframe_seconds(timeframe)
             start_time = end_time - timedelta(seconds=tf_seconds * limit * 1.5)
             
+            # yfinance 的 end 参数是不包含的（exclusive），需要加一天
+            end_time_inclusive = end_time + timedelta(days=1)
+            
             # 获取数据
             ticker = yf.Ticker(yf_symbol)
             df = ticker.history(
                 start=start_time,
-                end=end_time,
+                end=end_time_inclusive,
                 interval=yf_interval
             )
             
