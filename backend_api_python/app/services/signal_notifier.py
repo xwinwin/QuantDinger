@@ -24,6 +24,7 @@ import json
 import os
 import smtplib
 import time
+import traceback
 from datetime import datetime, timezone
 from email.message import EmailMessage
 from typing import Any, Dict, List, Optional, Tuple
@@ -482,6 +483,7 @@ class SignalNotifier:
             return True, ""
         except Exception as e:
             logger.warning(f"browser notify persist failed: {e}")
+            logger.error('browser.error', traceback=traceback.format_exc())
             return False, str(e)
 
     def _notify_webhook(
@@ -571,6 +573,7 @@ class SignalNotifier:
                 return False, f"http_{resp2.status_code}:{(resp2.text or '')[:300]}"
             return False, f"http_{resp.status_code}:{(resp.text or '')[:300]}"
         except Exception as e:
+            logger.error('webhook.error', traceback=traceback.format_exc())
             return False, str(e)
 
     def _notify_discord(self, *, url: str, payload: Dict[str, Any], fallback_text: str) -> Tuple[bool, str]:
@@ -646,6 +649,7 @@ class SignalNotifier:
                 pass
             return False, f"http_{resp.status_code}:{(resp.text or '')[:300]}"
         except Exception as e:
+            logger.error('discord.error', traceback=traceback.format_exc())
             return False, str(e)
 
     def _notify_telegram(
@@ -680,6 +684,7 @@ class SignalNotifier:
                 return True, ""
             return False, f"http_{resp.status_code}:{(resp.text or '')[:300]}"
         except Exception as e:
+            logger.error('telegram.error', traceback=traceback.format_exc())
             return False, str(e)
 
     def _notify_email(self, *, to_email: str, subject: str, body_text: str, body_html: str = "") -> Tuple[bool, str]:
@@ -718,6 +723,7 @@ class SignalNotifier:
                     server.send_message(msg)
             return True, ""
         except Exception as e:
+            logger.error('email.error', traceback=traceback.format_exc())
             return False, str(e)
 
     def _notify_phone(self, *, to_phone: str, body: str) -> Tuple[bool, str]:
@@ -734,6 +740,7 @@ class SignalNotifier:
                 return True, ""
             return False, f"http_{resp.status_code}:{(resp.text or '')[:300]}"
         except Exception as e:
+            logger.error('phone.error', traceback=traceback.format_exc())
             return False, str(e)
 
 
